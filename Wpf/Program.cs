@@ -1,7 +1,11 @@
 ﻿using System;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Linq;
+using System.Reactive.Linq;
+using System.Reactive.Subjects;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,12 +13,10 @@ using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Threading;
 using Windows.Devices.Power;
-using Windows.UI;
 using Windows.UI.ViewManagement;
 using Microsoft.Win32;
 using Percentage.Wpf.Properties;
 using Application = System.Windows.Application;
-using Color = System.Drawing.Color;
 using MessageBox = System.Windows.MessageBox;
 using PowerLineStatus = System.Windows.Forms.PowerLineStatus;
 
@@ -28,8 +30,38 @@ internal class Program
     internal const string Id = "f05f920a-c997-4817-84bd-c54d87e40625";
     private static readonly UISettings UiSettings = new();
 
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern bool DestroyIcon(IntPtr handle);
+    /// <summary>
+    ///     Performs a bit-block transfer of the color data corresponding to a
+    ///     rectangle of pixels from the specified source device context into
+    ///     a destination device context.
+    /// </summary>
+    /// <param name="hdc">Handle to the destination device context.</param>
+    /// <param name="nXDest">The leftmost x-coordinate of the destination rectangle (in pixels).</param>
+    /// <param name="nYDest">The topmost y-coordinate of the destination rectangle (in pixels).</param>
+    /// <param name="nWidth">The width of the source and destination rectangles (in pixels).</param>
+    /// <param name="nHeight">The height of the source and the destination rectangles (in pixels).</param>
+    /// <param name="hdcSrc">Handle to the source device context.</param>
+    /// <param name="nXSrc">The leftmost x-coordinate of the source rectangle (in pixels).</param>
+    /// <param name="nYSrc">The topmost y-coordinate of the source rectangle (in pixels).</param>
+    /// <param name="dwRop">A raster-operation code.</param>
+    /// <returns>
+    ///     <c>true</c> if the operation succeeds, <c>false</c> otherwise. To get extended error information, call
+    ///     <see cref="Marshal.GetLastWin32Error" />.
+    /// </returns>
+    [DllImport("gdi32.dll", EntryPoint = "BitBlt", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BitBlt([In] IntPtr hdc, int nXDest, int nYDest, int nWidth, int nHeight,
+        [In] IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
+    /// <summary>
+    ///     Retrieves the notify icon bounding rectangle.
+    /// </summary>
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern int Shell_NotifyIconGetRect([In] ref NotifyIconIdentifier identifier,
+        [Out] out Rect iconLocation);
 
     [STAThread]
     public static void Main()
@@ -87,11 +119,88 @@ internal class Program
                 { Items = { detailsMenuItem, settingsMenuItem, feedbackMenuItem, exitMenuItem } };
             using var notifyIcon = new NotifyIcon { Visible = true, ContextMenuStrip = menu };
 
-            // These seemingly redundant calls are necessary for the menu.SystemColorsChanged event handling to work
-            // before the menu is manually opened by the user. Without actually showing the menu forcing the menu to
-            // initialise, its SystemColorsChanged event won't trigger.
-            menu.Show();
-            menu.Close();
+            // This empty icon is required to get the background color of the tray icon in the first "Update" method call.
+            using (var bitmap = new Bitmap(1, 1))
+            {
+                var handle = ExecuteWithRetry(bitmap.GetHicon);
+                notifyIcon.Icon = Icon.FromHandle(handle);
+                DestroyIcon(handle);
+            }
+
+            // Determines if the task bar is using a light color.
+            bool IsLightTaskbar()
+            {
+                byte[] rgbValues;
+                try
+                {
+                    rgbValues = ExecuteWithRetry(() =>
+                    {
+                        // Use reflection to get the private "id" and "window" field from the managed NotifyIcon instance.
+                        var notifyIconType = typeof(NotifyIcon);
+                        var iconId = (int)notifyIconType.GetField("id", BindingFlags.NonPublic | BindingFlags.Instance)
+                            .GetValue(notifyIcon);
+                        var iconHandle = ((NativeWindow)notifyIconType
+                                .GetField("window", BindingFlags.NonPublic | BindingFlags.Instance)
+                                .GetValue(notifyIcon))
+                            .Handle;
+
+                        // Get the screen position of the tray icon.
+                        var notifyIconId = new NotifyIconIdentifier
+                        {
+                            hWnd = iconHandle,
+                            uID = (uint)iconId
+                        };
+                        notifyIconId.cbSize = (uint)Marshal.SizeOf(notifyIconId);
+                        Shell_NotifyIconGetRect(ref notifyIconId, out var rect);
+
+                        // Get the colour of the top left pixel of the tray icon.
+                        // This colour will be the taskbar colour.
+                        using var screenPixel = new Bitmap(1, 1, PixelFormat.Format32bppArgb);
+                        using var screenPixelGraphics = Graphics.FromImage(screenPixel);
+                        using (var screenGraphics = Graphics.FromHwnd(IntPtr.Zero))
+                        {
+                            var screenGraphicsHandle = screenGraphics.GetHdc();
+                            try
+                            {
+                                var screenPixelGraphicHandle = screenPixelGraphics.GetHdc();
+                                try
+                                {
+                                    // When reading the screen pixel, read the bottom right pixel of the tray icon.
+                                    // Because it is most unlikely to have any other UI appearing on top of this position
+                                    // when the pixel is being read.
+                                    // Note: the bottom pixel needs to be 1 pixel above the actual bottom pixel other wise
+                                    // the colour read back would always be the default colour value (transparent).
+                                    BitBlt(screenPixelGraphicHandle, 0, 0, 1, 1, screenGraphicsHandle, rect.Right,
+                                        rect.Bottom - 1,
+                                        (int)CopyPixelOperation.SourceCopy);
+                                }
+                                finally
+                                {
+                                    screenPixelGraphics.ReleaseHdc();
+                                }
+                            }
+                            finally
+                            {
+                                screenGraphics.ReleaseHdc();
+                            }
+                        }
+
+                        var color = screenPixel.GetPixel(0, 0);
+                        return new[] { color.R, color.G, color.B };
+                    });
+                }
+                catch
+                {
+                    // If anything goes wrong retrieving the colour of the top left pixel of the tray icon,
+                    // fall back to the WinUI app background colour.
+                    var colour = UiSettings.GetColorValue(UIColorType.Background);
+                    rgbValues = new[] { colour.R, colour.G, colour.B };
+                }
+
+                // If any 2 values in the color RGB combination are greater than 128,
+                // treat it as a light color.
+                return rgbValues.Count(x => x > 128) > 2;
+            }
 
             void ActivateDialog<T>(Action<T> windowCreated = null, Action<T> windowClosed = null)
                 where T : Window, new()
@@ -165,13 +274,18 @@ internal class Program
             // under the current display settings.
             SystemEvents.DisplaySettingsChanged += (_, _) => Update();
 
-            // Update tray icon colour when system colour changes.
-            // This event can be triggered when Windows changes between dark and light theme.
-            menu.SystemColorsChanged += (_, _) =>
-            {
-                SetNormalBrush();
-                Update();
-            };
+            // Update tray icon colour when user preference changes settled down.
+            var subject = new Subject<bool>();
+            using var userPreferenceChangeFinalised = subject.Throttle(TimeSpan.FromMilliseconds(500))
+                .ObserveOnDispatcher()
+                .Subscribe(_ =>
+                {
+                    SetNormalBrush();
+                    Update();
+                });
+
+            // This event can be triggered multiple times when Windows changes between dark and light theme.
+            SystemEvents.UserPreferenceChanged += (_, _) => subject.OnNext(false);
 
             // Initial update.
             Update();
@@ -260,10 +374,10 @@ internal class Program
 
                     // If the build number is less than 22000, it is Windows 10, otherwise it's Windows 11.
                     notifyIcon.Icon = OSVersion.Version.Build < 22000
-                        ? IsUsingLightTheme()
+                        ? IsLightTaskbar()
                             ? Resource.BatteryFullMetroLight
                             : Resource.BatteryFullMetroDark
-                        : IsUsingLightTheme()
+                        : IsLightTaskbar()
                             ? Resource.BatteryFullFluentLight
                             : Resource.BatteryFullFluentDark;
 
@@ -415,7 +529,7 @@ internal class Program
                 {
                     using (var graphics = Graphics.FromImage(bitmap))
                     {
-                        if (IsUsingLightTheme())
+                        if (IsLightTaskbar())
                         {
                             // Using anti aliasing provides the best clarity in Windows 10 light theme.
                             // The default ClearType rendering causes black edges around the text making
@@ -434,7 +548,7 @@ internal class Program
                     }
 
                     // Set tray icon from the drawn bitmap image.
-                    var handle = bitmap.GetHicon();
+                    var handle = ExecuteWithRetry(bitmap.GetHicon);
                     try
                     {
                         notifyIcon.Icon?.Dispose();
@@ -481,10 +595,25 @@ internal class Program
                     lastNotification = (notificationType, utcNow);
                 }
             }
+        }
 
-            static bool IsUsingLightTheme()
+        T ExecuteWithRetry<T>(Func<T> function, bool throwWhenFail = true)
+        {
+            for (var i = 0;;)
             {
-                return UiSettings.GetColorValue(UIColorType.Background) == Colors.White;
+                try
+                {
+                    return function();
+                }
+                catch when (i++ < 5)
+                {
+                    // Swallow exception if retry is possible.
+                }
+                catch when (!throwWhenFail)
+                {
+                    // Return default value if not throwing exception.
+                    return default;
+                }
             }
         }
     }
@@ -496,5 +625,23 @@ internal class Program
         Low,
         High,
         Full
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NotifyIconIdentifier
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uID;
+        public readonly Guid guidItem;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public readonly int Left;
+        public readonly int Top;
+        public readonly int Right;
+        public readonly int Bottom;
     }
 }
