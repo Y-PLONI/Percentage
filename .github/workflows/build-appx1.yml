@@ -1,0 +1,34 @@
+name: Build APPX Package
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v1.1
+
+      - name: Restore NuGet Packages
+        run: nuget restore Percentage.sln
+
+      - name: Build solution
+        run: msbuild.exe Percentage.sln /p:Configuration=Release
+
+      - name: Create APPX package
+        run: |
+          mkdir Packaging\Output
+          makeappx.exe pack /d Packaging /p Packaging\Output\BatteryPercentageIcon.appx
+
+      - name: Upload APPX as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: BatteryPercentageIcon
+          path: Packaging\Output\BatteryPercentageIcon.appx
