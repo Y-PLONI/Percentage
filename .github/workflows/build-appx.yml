@@ -21,7 +21,7 @@ jobs:
       # שלב 3: הגדרת Windows SDK
       - name: Install Windows SDK
         run: |
-          choco install windows-sdk-10-version-19041 -y
+          choco install windows-sdk -y
 
       # שלב 4: קומפילציה של קובצי EXE ו-DLL
       - name: Build EXE
