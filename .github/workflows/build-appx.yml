@@ -19,9 +19,10 @@ jobs:
         uses: microsoft/setup-msbuild@v1.1
 
       # שלב 3: הגדרת Windows SDK
-      - name: Install Windows SDK
+      - name: Install Windows SDK (Direct)
         run: |
-          choco install windows-sdk -y
+          curl -L -o windows-sdk-installer.exe https://go.microsoft.com/fwlink/?linkid=2120843
+          start /wait windows-sdk-installer.exe /quiet /norestart
 
       # שלב 4: קומפילציה של קובצי EXE ו-DLL
       - name: Build EXE
