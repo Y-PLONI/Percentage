@@ -2,8 +2,9 @@ name: Build APPX Package
 
 on:
   push:
-    workflow_dispatch:
+    branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
@@ -13,21 +14,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup NuGet
+        run: nuget restore Percentage.sln
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v1.1
 
-      - name: Restore NuGet Packages
-        run: nuget restore Percentage.sln
+      - name: Install Windows SDK
+        run: choco install windows-sdk -y
 
       - name: Build solution
-        run: msbuild.exe Percentage.sln /p:Configuration=Release
+        run: msbuild.exe Percentage.sln /p:Configuration=Release /p:Platform="x86"
 
       - name: Create APPX package
         run: |
           mkdir Packaging\Output
           makeappx.exe pack /d Packaging /p Packaging\Output\BatteryPercentageIcon.appx
 
-      - name: Upload APPX as Artifact
+      - name: Sign APPX package
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$CERTIFICATE_BASE64" | base64 -d > cert.pfx
+          signtool sign /fd SHA256 /a /f cert.pfx /p "$CERTIFICATE_PASSWORD" Packaging\Output\BatteryPercentageIcon.appx
+
+      - name: Upload APPX
         uses: actions/upload-artifact@v3
         with:
           name: BatteryPercentageIcon
