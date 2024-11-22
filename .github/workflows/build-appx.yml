@@ -22,7 +22,7 @@ jobs:
       - name: Install Windows SDK (Direct)
         run: |
           curl -L -o windows-sdk-installer.exe https://go.microsoft.com/fwlink/?linkid=2120843
-          start /wait windows-sdk-installer.exe /quiet /norestart
+          .\windows-sdk-installer.exe /quiet /norestart
 
       # שלב 4: קומפילציה של קובצי EXE ו-DLL
       - name: Build EXE
